@@ -12,6 +12,8 @@ import time
 # -(r)-> right_w2 -(f)-> right_hand  -(f)-> right_gripper_base
 # -(f)-> right_endpoint
 
+# youtube : https://www.youtube.com/watch?v=iidcy8RhOmY
+
 def rotation_matrix_x(angle):
     c = np.cos(angle)
     s = np.sin(angle)
@@ -71,6 +73,8 @@ def rot_to_quaternion(R):
    return np.array([e1, e2, e3, e4])
 
 def create_homogeneous_transformation(joints, move_angles=None):
+    T_array = []
+
     T_total = np.eye(4)
 
     for i, joint in enumerate(joints):
@@ -83,7 +87,9 @@ def create_homogeneous_transformation(joints, move_angles=None):
 
         T_total = T_total @ T
 
-    return T_total
+        T_array.append(T_total)
+
+    return T_array
 
 def load_joint_correct(robot_id, joint_name: str):
     # หาจุดสิ้นสุดของแขน (end effector) จาก PyBullet
@@ -102,6 +108,57 @@ def load_joint_correct(robot_id, joint_name: str):
             data_info['orientation'] = np.round(link_state[5], 5)   # World coordinate orientation
     
             return data_info
+
+def get_joint_states(robot_id):
+    """ดึงข้อมูลสถานะของ revolute joints เท่านั้น"""
+    num_joints = p.getNumJoints(robot_id)
+    joint_positions = []
+    joint_velocities = []
+    revolute_joint_indices = []
+    
+    for i in range(num_joints):
+        joint_info = p.getJointInfo(robot_id, i)
+        joint_type = joint_info[2]
+        joint_name = joint_info[1].decode()
+        
+        # เฉพาะ revolute joints เท่านั้น
+        if joint_type == p.JOINT_REVOLUTE:
+            joint_state = p.getJointState(robot_id, i)
+            joint_positions.append(joint_state[0])  # ตำแหน่ง
+            joint_velocities.append(joint_state[1]) # ความเร็ว
+            revolute_joint_indices.append(i)
+
+    return joint_positions, joint_velocities, revolute_joint_indices
+
+def find_end_effector_link_index(robot_id, target_link_name="right_gripper"):
+    """หา index ของ end effector link"""
+    for i in range(p.getNumJoints(robot_id)):
+        joint_info = p.getJointInfo(robot_id, i)
+        child_link_name = joint_info[12].decode()
+        
+        if child_link_name == target_link_name:
+            return i
+    
+    return -1  # ถ้าหาไม่เจอ
+
+def find_J(T):
+    J = []
+
+    Xp = T[-1][:3, 3]
+
+    for i in T:
+        r = i[:3, 2]
+        o = i[:3, 3]
+
+        linear_part = np.cross(r, (Xp - o))
+        angular_part = r
+
+        Ji = np.concatenate([linear_part, angular_part])
+
+        J.append(Ji)
+    
+    return np.column_stack(J)
+
 
 def main():
 
@@ -132,32 +189,35 @@ def main():
         {"name": "right_endpoint",           "position": [0, 0, 0.025],                      "orientation": [0, 0, 0]}
     ]
 
+    urdf_all = urdf_joint_base + urdf_joint_arm + urdf_joints_endefector
+
     while True:
-        target_positions = {
+        target_positions = { #สุ่มโดยใช้ช่วง limit แกนหมุนของ URDF 
+            'torso_t0': 0,
+            'right_torso_arm_mount':0,
             'right_s0': np.random.uniform(-1.70167993878, 1.70167993878),
             'right_s1': np.random.uniform(-2.147, 1.047),
             'right_e0': np.random.uniform(-3.05417993878, 3.05417993878),
             'right_e1': np.random.uniform(-0.05, 2.618),
             'right_w0': np.random.uniform(-3.059, 3.059),
             'right_w1': np.random.uniform(-1.57079632679, 2.094),
-            'right_w2': np.random.uniform(-3.059, 3.059)
+            'right_w2': np.random.uniform(-3.059, 3.059),
+            'right_hand':0,
+            'right_gripper_base':0,
+            'right_endpoint':0
         }
 
-        T_base = create_homogeneous_transformation(urdf_joint_base)
-        T_arm = create_homogeneous_transformation(urdf_joint_arm, target_positions)
-        T_end = create_homogeneous_transformation(urdf_joints_endefector)
+        T_base_end = create_homogeneous_transformation(urdf_all, target_positions)
 
-        T_base_end = T_base @ T_arm @ T_end
-
-        print(f"Posotion Calculate : {np.round(T_base_end[:3, 3], 5)}")
-        print(f"Corientation Calculate : {np.round(rot_to_quaternion(T_base_end[:3, :3]), 5)}")
+        print(f"Position Calculate : {np.round(T_base_end[-1][:3, 3], 5)}")
+        print(f"Orientation Calculate : {np.round(rot_to_quaternion(T_base_end[-1][:3, :3]), 5)}")
 
         # สร้างบอล ไม่เอา collision เพราะแขนจะชนแล้วไปไม่ถึง
         ball_visual = p.createVisualShape(p.GEOM_SPHERE, radius=0.05, rgbaColor=[1, 0, 0, 1])
         ball_id = p.createMultiBody(
             baseMass=0,
             baseVisualShapeIndex=ball_visual,
-            basePosition=T_base_end[:3, 3]
+            basePosition=T_base_end[-1][:3, 3]
         )
 
         # Move the joints
@@ -172,7 +232,7 @@ def main():
                     jointIndex=i,
                     controlMode=p.POSITION_CONTROL,
                     targetPosition=target_positions[joint_name],
-                    force=100.0
+                    force=100000.0
                 )
 
         # Run simulation
@@ -181,10 +241,59 @@ def main():
             time.sleep(1.0 / 240.0)
 
         joint_data = load_joint_correct(robot_id, "right_w2")
-        print(f"Posotion Pybullet : {joint_data['position']}")
-        print(f"Corientation Pybullet : {joint_data['orientation']}")
+        print(f"Position Pybullet : {joint_data['position']}")
+        print(f"Orientation Pybullet : {joint_data['orientation']}")
 
         p.removeBody(ball_id)
+
+        #----------------------------- Jacobian ------------------------------#
+        
+        # ดึงข้อมูลสถานะ revolute joints เท่านั้น
+        joint_positions, joint_velocities, revolute_joint_indices = get_joint_states(robot_id)
+        
+        # กำหนดความเร่ง (ถ้าไม่มีให้ใส่ 0)
+        joint_accelerations = [0.0] * len(joint_positions)
+        
+        # หา index ของ end effector
+        end_effector_index = find_end_effector_link_index(robot_id, "right_wrist")
+        
+        if end_effector_index == -1:
+            print("ไม่พบ end effector link!")
+            continue
+
+        jacobian_linear, jacobian_angular = p.calculateJacobian(
+            bodyUniqueId=robot_id,                    # ID ของหุ่นยนต์
+            linkIndex=end_effector_index,             # Index ของ link ปลาย (end-effector) 
+            localPosition=[0, 0, 0],                  # ตำแหน่งใน local frame ของ link
+            objPositions=joint_positions,             # ตำแหน่ง revolute joints เท่านั้น
+            objVelocities=joint_velocities,           # ความเร็ว revolute joints เท่านั้น
+            objAccelerations=joint_accelerations      # ความเร่ง revolute joints เท่านั้น
+        )
+        
+
+        jac_linear = np.array(jacobian_linear)
+        jac_angular = np.array(jacobian_angular)
+
+        full_jacobian = np.vstack([jac_linear, jac_angular])
+
+        non_zero_cols = []
+        for i in range(full_jacobian.shape[1]):
+            if np.any(np.abs(full_jacobian[:, i]) > 1e-6):
+                non_zero_cols.append(i)
+
+        if len(non_zero_cols) > 0:
+            active_jacobian = full_jacobian[:, non_zero_cols]
+            print("Active Jacobian:")
+            print(np.round(active_jacobian, 4))
+
+        T_base_use = T_base_end[2:-3]
+        cal_J = find_J(T_base_use)
+
+        print("Calculate Jacobian:")
+        print(np.round(cal_J,4))
+        
+        input("Press Enter to continue...")
+
 
 if __name__ == "__main__":
     main()
